@@ -2,7 +2,7 @@
 //
 //    FILE: AS5600.h
 //  AUTHOR: Rob Tillaart
-// VERSION: 0.4.0
+// VERSION: 0.6.4
 // PURPOSE: Arduino library for AS5600 magnetic rotation meter
 //    DATE: 2022-05-28
 //     URL: https://github.com/RobTillaart/AS5600
@@ -12,7 +12,8 @@
 #include "Wire.h"
 
 
-#define AS5600_LIB_VERSION              (F("0.4.0"))
+#define AS5600_LIB_VERSION              (F("0.6.4"))
+
 
 //  default addresses
 const uint8_t AS5600_DEFAULT_ADDRESS    = 0x36;
@@ -35,6 +36,17 @@ const float   AS5600_RAW_TO_RPM         = 60.0 / 4096;
 const uint8_t AS5600_MODE_DEGREES       = 0;
 const uint8_t AS5600_MODE_RADIANS       = 1;
 const uint8_t AS5600_MODE_RPM           = 2;
+
+
+//  ERROR CODES
+const int     AS5600_OK                 = 0;
+const int     AS5600_ERROR_I2C_READ_0   = -100;
+const int     AS5600_ERROR_I2C_READ_1   = -101;
+const int     AS5600_ERROR_I2C_READ_2   = -102;
+const int     AS5600_ERROR_I2C_READ_3   = -103;
+const int     AS5600_ERROR_I2C_WRITE_0  = -200;
+const int     AS5600_ERROR_I2C_WRITE_1  = -201;
+
 
 //  CONFIGURE CONSTANTS
 //  check datasheet for details
@@ -89,14 +101,12 @@ class AS5600
 public:
   AS5600(TwoWire *wire = &Wire);
 
-#if defined (ESP8266) || defined(ESP32)
-  //  AS5600_SW_DIRECTION_PIN is software controlled direction pin
-  bool     begin(int dataPin, int clockPin, uint8_t directionPin = AS5600_SW_DIRECTION_PIN);
-#endif
   bool     begin(uint8_t directionPin = AS5600_SW_DIRECTION_PIN);
-  bool     isConnected();
+  //  made virtual, see #66
+  virtual bool isConnected();
 
-  //  address = 0x36 for AS5600, 0x40 for AS5600L
+  //  address = fixed   0x36 for AS5600,
+  //          = default 0x40 for AS5600L
   uint8_t  getAddress();
 
 
@@ -183,8 +193,9 @@ public:
   //  degrees = -359.99 .. 359.99 (preferred)
   //  returns false if abs(parameter) > 36000
   //          => expect loss of precision
-  bool     setOffset(float degrees);
+  bool     setOffset(float degrees);       //  sets an absolute offset
   float    getOffset();
+  bool     increaseOffset(float degrees);  //  adds to existing offset.
 
 
   //  READ STATUS REGISTERS
@@ -204,15 +215,16 @@ public:
   //  void burnSetting();
 
 
-  //  Experimental 0.1.2 - to be tested.
+  //  EXPERIMENTAL 0.1.2 - to be tested.
   //  approximation of the angular speed in rotations per second.
   //  mode == 1: radians /second
   //  mode == 0: degrees /second  (default)
-  float    getAngularSpeed(uint8_t mode = AS5600_MODE_DEGREES);
+  float    getAngularSpeed(uint8_t mode = AS5600_MODE_DEGREES,
+                           bool update = true);
 
   //  EXPERIMENTAL CUMULATIVE POSITION
   //  reads sensor and updates cumulative position
-  int32_t  getCumulativePosition();
+  int32_t  getCumulativePosition(bool update = true);
   //  converts last position to whole revolutions.
   int32_t  getRevolutions();
   //  resets position only (not the i)
@@ -222,23 +234,28 @@ public:
   //  returns last position.
   int32_t  resetCumulativePosition(int32_t position = 0);
 
+  //  EXPERIMENTAL 0.5.2
+  int      lastError();
+
 
 protected:
-  uint8_t  readReg(uint8_t reg);
-  uint16_t readReg2(uint8_t reg);
-  uint8_t  writeReg(uint8_t reg, uint8_t value);
-  uint8_t  writeReg2(uint8_t reg, uint16_t value);
+  //  made virtual, see #66
+  virtual uint8_t  readReg(uint8_t reg);
+  virtual uint16_t readReg2(uint8_t reg);
+  virtual uint8_t  writeReg(uint8_t reg, uint8_t value);
+  virtual uint8_t  writeReg2(uint8_t reg, uint16_t value);
 
   uint8_t  _address         = AS5600_DEFAULT_ADDRESS;
   uint8_t  _directionPin    = 255;
   uint8_t  _direction       = AS5600_CLOCK_WISE;
-  uint8_t  _error           = 0;
+  int      _error           = AS5600_OK;
 
   TwoWire*  _wire;
 
   //  for getAngularSpeed()
   uint32_t _lastMeasurement = 0;
   int16_t  _lastAngle       = 0;
+  int16_t  _lastReadAngle   = 0;
 
   //  for readAngle() and rawAngle()
   uint16_t _offset          = 0;
@@ -271,4 +288,5 @@ public:
 
 
 //  -- END OF FILE --
+
 

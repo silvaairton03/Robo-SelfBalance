@@ -2,25 +2,23 @@
 #include<Wire.h>
 #include<MPU6050.h>
 #include <MPU6050_6Axis_MotionApps20.h>
-#include"AccelStepper.h"
-#include"MultiStepper.h"
-#include "encoder_as5600.h"
-#include "AS5600.h"
+#include<AccelStepper.h>
+#include<MultiStepper.h>
+#include<AS5600.h>
 
-AccelStepper motor1(1, 25, 26);
-#define M1_ENABLE_PIN  19
+const int EN = 23;
+const int DIR = 14;
+const int STEP = 12;
 
-AccelStepper motor2(1, 32, 33);
-#define M2_ENABLE_PIN  18
+const int DIR_2 = 33;
+const int STEP_2 = 32;
 
-Encoder encoder;
+void acionaMotor();
 
-// TwoWire Wire_1 = TwoWire(1);
+TwoWire I2C_2 = TwoWire(1); // Criação do segundo barramento I2C
 
-AS5600 as5600_0(&Wire);
-// AS5600 as5600_1(&Wire_1);
-
-MultiStepper steppers;
+AS5600 as5600(&Wire);;        // Sensor no barramento I2C principal (Wire)
+AS5600 as5600_2(&I2C_2);      // Sensor no barramento I2C secundário
 
 MPU6050_Base mpu;
 
@@ -35,8 +33,6 @@ float alpha = 0.98;
 float y_hp[] = {0, 0}, x_hp[] = {0, 0}, y_lp[] = {0, 0}, x_lp[] = {0, 0};
 float const_a = 0.95;
 float rpm;
-float uL, uR;
-int pwmL, pwmR;
 float pitch, roll, angularVelocity;
 float rollOffset;
 
@@ -44,6 +40,7 @@ void controlSignal(float state1, float state2, float state3, float state4);
 
 unsigned long currentMillis;
 unsigned long prevMillis = 0;
+unsigned long timer = 0;
 const unsigned long sampleTime = 35;
 
 //float k[4] = {-2.5456 ,  -32.1588  , -1.2147 ,  -3.0287};
@@ -52,69 +49,81 @@ float k[4] = {-16.9811,  -33.1417,  200.7556,   46.2064};
 void setup(){
     pinMode(2, OUTPUT);
     Serial.begin(9600);
+    pinMode(EN, OUTPUT);
+    pinMode(DIR, OUTPUT);
+    pinMode(STEP, OUTPUT);
 
-    pinMode(M1_ENABLE_PIN, OUTPUT);
-    pinMode(M2_ENABLE_PIN, OUTPUT);
+    pinMode(EN, OUTPUT);
+    pinMode(DIR_2, OUTPUT);
+    pinMode(STEP_2, OUTPUT);
+
+    Serial.println(__FILE__);
+    Serial.print("AS5600_LIB_VERSION: ");
+    Serial.println(AS5600_LIB_VERSION);
+    
+    // Configuração do primeiro barramento I2C
+    // SCL, SDA
+    Wire.begin(21, 22);
+    as5600.begin(5); // Configuração do sensor no barramento principal
+    as5600.setDirection(AS5600_CLOCK_WISE);
+
+    //Teste de conexão para encoder ligado no primeiro barramento I2C
+    Serial.print("Sensor 1 conectado: ");
+    Serial.println(as5600.isConnected());
+
+    // Configuração do segundo barramento I2C
+    //  SDA, SCL
+    I2C_2.begin(26, 25); // Pinos diferentes para o segundo barramento I2C
+    as5600_2.begin(4); // Configuração do sensor no segundo barramento
+    as5600_2.setDirection(AS5600_CLOCK_WISE);
+
+    Serial.print("Sensor 2 conectado: ");
+    Serial.println(as5600_2.isConnected());
 
     //Inicializando MPU6050
-    Wire.begin(21, 22);
-    // Wire.setClock(400000);
-    as5600_0.begin(5);
-    as5600_0.setDirection(AS5600_CLOCK_WISE);
-    int a = as5600_0.isConnected();
-    Serial.print("Connect: ");
-    Serial.println(a);
-    // encoder.setEncoder_AS5600(as5600_1, 32,33,25, Wire_1); 
+    Wire.setClock(400000);
+    mpu.reset();
+    delay(100);
+    mpu.initialize();
+    if (!mpu.testConnection()) {
+        Serial.println("MPU6050 not connected!");
+        while (1);
+    }
+    Serial.println("MPU6050 connected!");
 
-    //Configurando Encoder Motor 1
-    // encoder1.setEncoder_AS5600(as5600_0, 21, 22, 5, Wire);
+    mpu.setFullScaleAccelRange(2);
+    mpu.setFullScaleGyroRange(250);
 
-    //Configurando Encoder Motor 2
-    // encoder2.setEncoder_AS5600(as5600_1, 32, 33, 25, Wire_1);
+    calculateRollOffset();
+    Serial.print("Roll Offset Calculated: ");
+    Serial.println(rollOffset);
 
-    motor1.setMaxSpeed(400);
-    motor2.setMaxSpeed(400);
-
-    steppers.addStepper(motor1);
-    steppers.addStepper(motor2);
-    // mpu.reset();
-    // delay(100);
-    // mpu.initialize();
-
-    // if (!mpu.testConnection()) {
-    //     Serial.println("MPU6050 not connected!");
-    //     while (1);
-    // }
-    // Serial.println("MPU6050 connected!");
-
-    // mpu.setFullScaleAccelRange(2);
-    // mpu.setFullScaleGyroRange(250);
-
-    // calculateRollOffset();
-    // Serial.print("Roll Offset Calculated: ");
-    // Serial.println(rollOffset);
-    digitalWrite(M1_ENABLE_PIN, LOW);
-    digitalWrite(M2_ENABLE_PIN, LOW);
+    digitalWrite(EN, LOW);
+    for(int i=0;i<2;i++){
+        delay(1000);
+        acionaMotor();
+        delay(1000);
+    }
+    delay(1000);
 }
 
 void loop(){
-    // long positions[2];
+    //m1.runSpeed();
+  if ((millis() - timer) >= 20) {
+    acionaMotor();
+    // Leituras do primeiro sensor
+    Serial.print("Sensor 1 - a = ");
+//    Serial.print(as5600.readAngle());
+//    Serial.print("\tω = ");
+    Serial.println(as5600.getAngularSpeed(AS5600_MODE_RPM));
+    // Leituras do segundo sensor
+    Serial.print("    Sensor 2 - a = ");
+//    Serial.println(as5600_2.readAngle());
+//    Serial.print("\tω = ");
+    Serial.println(as5600_2.getAngularSpeed(AS5600_MODE_RPM));
 
-    // positions[0] = 200;
-    // positions[1] = 200;
-    // steppers.moveTo(positions);
-    // steppers.runSpeedToPosition(); 
-    // delay(1000);
-
-    // positions[0] = -200;
-    // positions[1] = -200;
-    // steppers.moveTo(positions);
-    // steppers.runSpeedToPosition(); 
-    // delay(1000);
-
-    rpm = encoder.getRPM_AS5600(as5600_0);
-    Serial.println(rpm);
-    delay(500);
+    timer = millis();
+  }
 }
 
 
@@ -135,7 +144,38 @@ void calculateRollOffset()
     rollOffset = tempRoll / samples;
 }
 
-void imuMeasures(){
+void acionaMotor()
+{
+    // permite que o motor se mova em uma direção particular
+  digitalWrite(DIR, HIGH);
+  digitalWrite(DIR_2, HIGH);
+
+  // faz 200 pulsos para fazer uma rotação de ciclo completo
+  for (int x = 0; x < 100; x++) {
+    digitalWrite(STEP, HIGH);
+    digitalWrite(STEP_2, HIGH);
+    delayMicroseconds(1500);
+    digitalWrite(STEP, LOW);
+    digitalWrite(STEP_2, LOW);
+    delayMicroseconds(1500);
+  }
+//  delay(1000); //1 segundo de delay para inverter a direção
+
+//  digitalWrite(DIR, LOW);
+
+//  // faz 400 pulsos para fazer duas rotações de ciclo completo
+//  for (int x = 0; x < 200; x++) {
+//    digitalWrite(STEP, HIGH);
+//    delayMicroseconds(1500);
+//    digitalWrite(STEP, LOW);
+//    delayMicroseconds(1500);
+//  }
+//  delay(1000);
+
+}
+
+void imuMeasures()
+{
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
     float ax_g = (float)ax / 4096.0;
@@ -171,31 +211,4 @@ void imuMeasures(){
 // }
 
 void controlSignal(float state1, float state2, float state3, float state4)
-{
-  uL = 0.15 * -(k[0]*state1 + k[1]*state2 + k[2]*state3 + k[3]*state4);
-  // uL = 7;
-  uR = uL;
-
-  uL = constrain(uL, -9.0, 9.0);
-  uR = constrain(uR, -9.0, 9.0);
-
-  pwmL = map(-uL, -9.0, 9.0, -200, 200); 
-  pwmR = map(-uR, -9.0, 9.0, -200, 200); 
-
-  // int PWM_MIN = 75;
-  // if (uL < 0) {
-  //       pwmL = map(uL, -9.0, 0.0, -200, -PWM_MIN); 
-  //   } else if (uL > 0) {
-  //       pwmL = map(uL, 0.0, 9.0, PWM_MIN, 200); 
-  //   } else {
-  //       pwmL = 0; 
-  //   }
-
-  // if (uR < 0) {
-  //       pwmR = map(uR, -9.0, 0.0, -200, -PWM_MIN);
-  //   } else if (uR > 0) {
-  //       pwmR = map(uR, 0.0, 9.0, PWM_MIN, 200);
-  //   } else {
-  //       pwmR = 0;
-  //   }
-}
+{}

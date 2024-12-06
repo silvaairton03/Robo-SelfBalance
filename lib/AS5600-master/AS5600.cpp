@@ -1,7 +1,7 @@
 //
 //    FILE: AS56000.cpp
 //  AUTHOR: Rob Tillaart
-// VERSION: 0.4.0
+// VERSION: 0.6.4
 // PURPOSE: Arduino library for AS5600 magnetic rotation meter
 //    DATE: 2022-05-28
 //     URL: https://github.com/RobTillaart/AS5600
@@ -55,30 +55,6 @@ AS5600::AS5600(TwoWire *wire)
 }
 
 
-#if defined (ESP8266) || defined(ESP32)
-
-bool AS5600::begin(int dataPin, int clockPin, uint8_t directionPin)
-{
-  _directionPin = directionPin;
-  if (_directionPin != AS5600_SW_DIRECTION_PIN)
-  {
-    pinMode(_directionPin, OUTPUT);
-  }
-  setDirection(AS5600_CLOCK_WISE);
-
-  if ((dataPin < 255) && (clockPin < 255))
-  {
-    _wire->begin(dataPin, clockPin);
-  } else {
-    _wire->begin();
-  }
-  if (! isConnected()) return false;
-  return true;
-}
-
-#endif
-
-
 bool AS5600::begin(uint8_t directionPin)
 {
   _directionPin = directionPin;
@@ -88,7 +64,6 @@ bool AS5600::begin(uint8_t directionPin)
   }
   setDirection(AS5600_CLOCK_WISE);
 
-  _wire->begin();
   if (! isConnected()) return false;
   return true;
 }
@@ -328,10 +303,11 @@ uint8_t AS5600::getWatchDog()
 //
 uint16_t AS5600::rawAngle()
 {
-  int16_t value = readReg2(AS5600_RAW_ANGLE) & 0x0FFF;
-  if (_offset > 0) value = (value + _offset) & 0x0FFF;
+  int16_t value = readReg2(AS5600_RAW_ANGLE);
+  if (_offset > 0) value += _offset;
+  value &= 0x0FFF;
 
-  if ((_directionPin == AS5600_SW_DIRECTION_PIN) && 
+  if ((_directionPin == AS5600_SW_DIRECTION_PIN) &&
       (_direction == AS5600_COUNTERCLOCK_WISE))
   {
     value = (4096 - value) & 0x0FFF;
@@ -342,14 +318,21 @@ uint16_t AS5600::rawAngle()
 
 uint16_t AS5600::readAngle()
 {
-  uint16_t value = readReg2(AS5600_ANGLE) & 0x0FFF;
-  if (_offset > 0) value = (value + _offset) & 0x0FFF;
+  uint16_t value = readReg2(AS5600_ANGLE);
+  if (_error != AS5600_OK)
+  {
+    return _lastReadAngle;
+  }
+  if (_offset > 0) value += _offset;
+  value &= 0x0FFF;
 
-  if ((_directionPin == AS5600_SW_DIRECTION_PIN) && 
+  if ((_directionPin == AS5600_SW_DIRECTION_PIN) &&
       (_direction == AS5600_COUNTERCLOCK_WISE))
   {
+    //  mask needed for value == 0.
     value = (4096 - value) & 0x0FFF;
   }
+  _lastReadAngle = value;
   return value;
 }
 
@@ -362,8 +345,8 @@ bool AS5600::setOffset(float degrees)
   if (neg) degrees = -degrees;
 
   uint16_t offset = round(degrees * AS5600_DEGREES_TO_RAW);
-  offset &= 4095;
-  if (neg) offset = 4096 - offset;
+  offset &= 0x0FFF;
+  if (neg) offset = (4096 - offset) & 0x0FFF;
   _offset = offset;
   return true;
 }
@@ -372,6 +355,13 @@ bool AS5600::setOffset(float degrees)
 float AS5600::getOffset()
 {
   return _offset * AS5600_RAW_TO_DEGREES;
+}
+
+
+bool AS5600::increaseOffset(float degrees)
+{
+  //  add offset to existing offset in degrees.
+  return setOffset((_offset * AS5600_RAW_TO_DEGREES) + degrees);
 }
 
 
@@ -442,19 +432,28 @@ bool AS5600::magnetTooWeak()
 //  }
 
 
-float AS5600::getAngularSpeed(uint8_t mode)
+float AS5600::getAngularSpeed(uint8_t mode, bool update)
 {
+  if (update)
+  {
+    _lastReadAngle = readAngle();
+    if (_error != AS5600_OK)
+    {
+      return NAN;
+    }
+  }
+  //  default behaviour
   uint32_t now     = micros();
-  int      angle   = readAngle();
+  int      angle   = _lastReadAngle;
   uint32_t deltaT  = now - _lastMeasurement;
   int      deltaA  = angle - _lastAngle;
 
   //  assumption is that there is no more than 180° rotation
   //  between two consecutive measurements.
   //  => at least two measurements per rotation (preferred 4).
-  if (deltaA >  2048) deltaA -= 4096;
-  if (deltaA < -2048) deltaA += 4096;
-  float    speed   = (deltaA * 1e6) / deltaT;
+  if (deltaA >  2048)      deltaA -= 4096;
+  else if (deltaA < -2048) deltaA += 4096;
+  float speed = (deltaA * 1e6) / deltaT;
 
   //  remember last time & angle
   _lastMeasurement = now;
@@ -478,9 +477,17 @@ float AS5600::getAngularSpeed(uint8_t mode)
 //
 //  POSITION cumulative
 //
-int32_t AS5600::getCumulativePosition()
+int32_t AS5600::getCumulativePosition(bool update)
 {
-  int16_t value = readReg2(AS5600_ANGLE) & 0x0FFF;
+  if (update)
+  {
+    _lastReadAngle = readAngle();
+    if (_error != AS5600_OK)
+    {
+      return _position;  //  last known position.
+    }
+  }
+  int16_t value = _lastReadAngle;
 
   //  whole rotation CW?
   //  less than half a circle
@@ -494,7 +501,10 @@ int32_t AS5600::getCumulativePosition()
   {
     _position = _position - 4096 - _lastPosition + value;
   }
-  else _position = _position - _lastPosition + value;
+  else
+  {
+    _position = _position - _lastPosition + value;
+  }
   _lastPosition = value;
 
   return _position;
@@ -504,9 +514,8 @@ int32_t AS5600::getCumulativePosition()
 int32_t AS5600::getRevolutions()
 {
   int32_t p = _position >> 12;  //  divide by 4096
+  if (p < 0) p++;  //  correct negative values, See #65
   return p;
-  // if (p < 0) p++;
-  // return p;
 }
 
 
@@ -520,10 +529,18 @@ int32_t AS5600::resetPosition(int32_t position)
 
 int32_t AS5600::resetCumulativePosition(int32_t position)
 {
-  _lastPosition = readReg2(AS5600_RAW_ANGLE) & 0x0FFF;
+  _lastPosition = readAngle();
   int32_t old = _position;
   _position = position;
   return old;
+}
+
+
+int AS5600::lastError()
+{
+  int value = _error;
+  _error = AS5600_OK;
+  return value;
 }
 
 
@@ -533,11 +550,20 @@ int32_t AS5600::resetCumulativePosition(int32_t position)
 //
 uint8_t AS5600::readReg(uint8_t reg)
 {
+  _error = AS5600_OK;
   _wire->beginTransmission(_address);
   _wire->write(reg);
-  _error = _wire->endTransmission();
-
-  _wire->requestFrom(_address, (uint8_t)1);
+  if (_wire->endTransmission() != 0)
+  {
+    _error = AS5600_ERROR_I2C_READ_0;
+    return 0;
+  }
+  uint8_t n = _wire->requestFrom(_address, (uint8_t)1);
+  if (n != 1)
+  {
+    _error = AS5600_ERROR_I2C_READ_1;
+    return 0;
+  }
   uint8_t _data = _wire->read();
   return _data;
 }
@@ -545,11 +571,20 @@ uint8_t AS5600::readReg(uint8_t reg)
 
 uint16_t AS5600::readReg2(uint8_t reg)
 {
+  _error = AS5600_OK;
   _wire->beginTransmission(_address);
   _wire->write(reg);
-  _error = _wire->endTransmission();
-
-  _wire->requestFrom(_address, (uint8_t)2);
+  if (_wire->endTransmission() != 0)
+  {
+    _error = AS5600_ERROR_I2C_READ_2;
+    return 0;
+  }
+  uint8_t n = _wire->requestFrom(_address, (uint8_t)2);
+  if (n != 2)
+  {
+    _error = AS5600_ERROR_I2C_READ_3;
+    return 0;
+  }
   uint16_t _data = _wire->read();
   _data <<= 8;
   _data += _wire->read();
@@ -559,21 +594,29 @@ uint16_t AS5600::readReg2(uint8_t reg)
 
 uint8_t AS5600::writeReg(uint8_t reg, uint8_t value)
 {
+  _error = AS5600_OK;
   _wire->beginTransmission(_address);
   _wire->write(reg);
   _wire->write(value);
-  _error = _wire->endTransmission();
+  if (_wire->endTransmission() != 0)
+  {
+    _error = AS5600_ERROR_I2C_WRITE_0;
+  }
   return _error;
 }
 
 
 uint8_t AS5600::writeReg2(uint8_t reg, uint16_t value)
 {
+  _error = AS5600_OK;
   _wire->beginTransmission(_address);
   _wire->write(reg);
   _wire->write(value >> 8);
   _wire->write(value & 0xFF);
-  _error = _wire->endTransmission();
+  if (_wire->endTransmission() != 0)
+  {
+    _error = AS5600_ERROR_I2C_WRITE_0;
+  }
   return _error;
 }
 
@@ -619,4 +662,5 @@ uint8_t AS5600L::getI2CUPDT()
 
 
 //  -- END OF FILE --
+
 
